@@ -1,6 +1,6 @@
 
 
-
+#include <unistd.h>
 #include <cstdint>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -103,10 +103,19 @@ Control_plane::Control_plane(const char* fd_name,  size_t max_slot_cnt  ,size_t 
 	if(fd_name == nullptr){
 		total_failure<Control_plane>();
 	}
+	int ret ;
 	// check for if it is not rounded to the power of 2
 	// use bit ceil on the max slo tand descrnt 
-	size_t total_sz = sizeof(SPSC_queue) + HD_DES_2TYPE  + (max_slot_cnt * MAX_SLOT_SZ) + HD_DES_2TYPE + (descr_cnt * sizeof(Descriptor_t)) ; 
-	int fd =shm_open(fd_name, int oflag, mode_t mode) ;	
+	size_t total_sz = sizeof(SPSC_queue) + HD_DES_2TYPE  + (max_slot_cnt * MAX_SLOT_SZ) + HD_DES_2TYPE + (descr_cnt * sizeof(Descriptor_t)) ;
+
+	int fd = shm_open(fd_name, O_RDWR | O_CREAT, S_IRWXU) ;
+	if(fd == -1) {
+		total_failure<Control_plane>();
+	}
+	ret = ftruncate(fd,static_cast<std::uint32_t>(total_sz));	
+	if(ret == -1 ) {
+		total_failure<Control_plane>();
+	}
 	//ftruncate 
 	// mmap 
 	// madvise 
