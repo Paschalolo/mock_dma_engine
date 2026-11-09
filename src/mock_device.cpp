@@ -1,19 +1,18 @@
 
-#include <asm-generic/mman-common.h>
-#include <cstdlib>
-#include <utility>
 #define _DEFAULT_SOURCE 
 #include <unistd.h>
 #include <cstdint>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <cstdlib>
 #include <linux/mman.h>
 #include <atomic>
 #include <new> 
 #include <cstdio>
 #include <type_traits>
 #include <bit>
+#include <utility>
 /* Error Definitions */ 
 
 /* Definitions */
@@ -22,13 +21,13 @@ constexpr size_t HD_DES_2TYPE {std::hardware_destructive_interference_size * 2UL
 constexpr size_t MAX_SLOT_SZ = 4096ULL;
 /* ENum Definitions */
 enum Descriptor_state : std::uint32_t{
-	DES_FREE  = 0x00 , 
-	DES_READY = 0x01 , 
-	DES_PROCESSING = 0x02 , 
-	DES_DONE = 0x03, 
-	DES_SKIPPED , 
-	DES_EMPTY, 
-	DES_SHUTDOWN 
+	DES_FLAG_FREE  = 0x00 , 
+	DES_FLAG_READY = 0x01 , 
+	DES_FLAG_PROCESSING = 0x02 , 
+	DES_FLAG_DONE = 0x03, 
+	DES_FLAG_SKIPPED , 
+	DES_FLAG_EMPTY, 
+	DES_FLAG_SHUTDOWN 
 };
 /* Struct Defintions */ 
 enum class Data_pl_init : std::uint8_t{
@@ -108,8 +107,7 @@ void __attribute__((cold , noinline)) total_failure(){
 }
 
 
-/* Function definitions */ setne al
-  bsr rdi, rdi
+/* Function definitions */ 
 
 Control_plane::Control_plane(const char* fd_name,  size_t max_slot_cnt  ,size_t descr_cnt) noexcept {
 	if(fd_name == nullptr){
