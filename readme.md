@@ -1,6 +1,6 @@
 A Lock-Free Host-to-Device Ring Buffer Protocol (Mock DMA Engine)
 
-A high-performance, user-space software simulation of a hardware accelerator interface (modeled after enterprise PCIe DMA engines like AWS Nitro or Trainium). This project demonstrates extreme low-latency concurrency, separating the **control plane** (metadata descriptors) from the **data plane** (zero-copy payload arenas) using lock-free Single-Producer Single-Consumer (SPSC) rings and explicit memory barriers.
+A high-performance, user-space software simulation of a hardware accelerator interface (modeled after enterprise PCIe DMA engines like AWS Nitro or Trainium). This project demonstrates extreme low-latency concurrency, separating the **control plane** (metadata descriptors) from the **data plane** (zero-copy payload arenas) using lock-free Single-Producer Single-Consumer (SPSC) circular rings and explicit memory barriers.
 
 ---
 
@@ -12,7 +12,7 @@ This project simulates how a **Host CPU** and a **Device Accelerator** communica
 1. **Zero-Copy Architecture:** Pre-allocated payload arenas backed by Linux Huge Pages (`MAP_HUGETLB`) to eliminate TLB thrashing and memory copying.
 2. **Control-Data Decoupling:** A lightweight metadata ring containing fixed-size descriptors that point directly into the payload arena.
 3. **Pure Atomic Concurrency:** Complete elimination of locks (`std::mutex`), replaced entirely by strict atomic operations and memory fences (`std::memory_order_acquire` and `std::memory_order_release`).
-
+4. No dependency bloat or abstraction just standard libc libary 
 ---
 
 ## 🏛️ System Architecture
