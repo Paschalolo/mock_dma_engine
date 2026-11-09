@@ -1,5 +1,8 @@
 
-
+#include <asm-generic/mman-common.h>
+#include <cstdlib>
+#include <utility>
+#define _DEFAULT_SOURCE 
 #include <unistd.h>
 #include <cstdint>
 #include <sys/stat.h>
@@ -24,9 +27,14 @@ enum Descriptor_state : std::uint32_t{
 	DES_PROCESSING = 0x02 , 
 	DES_DONE = 0x03, 
 	DES_SKIPPED , 
-	DES_EMPTY 
+	DES_EMPTY, 
+	DES_SHUTDOWN 
 };
 /* Struct Defintions */ 
+enum class Data_pl_init : std::uint8_t{
+	NOT_READY = 0x00 ,  
+	READY = 0x1
+};
 
 struct alignas(HD_DES_2TYPE)Descriptor_t{
 	std::atomic<std::uint64_t> m_state ;
@@ -44,6 +52,7 @@ struct alignas(HD_DES_2TYPE) SPSC_queue{
 	alignas(HD_DES_2TYPE) std::atomic<std::uint64_t> m_data_plane_pos;
 	std::atomic<std::uint64_t> m_actual_data_plane_pos;
 	std::uint8_t m_data_mask ;
+	std::atomic<uint8_t> m_ready; 
 };
 
 
@@ -51,20 +60,20 @@ struct alignas(CACHE_LINE) Control_plane{
 	SPSC_queue* m_queue ;
 	void* m_payload_queue;
 	Descriptor_t* m_descriptor_queue;
-	void* m_local_buffer;
 	size_t m_local_ctrl_plane_pos ;
 	size_t m_local_data_plane_pos ;
 	void* m_actual_mmap_space;
-	size_t payload_count ;
-	size_t descriptor_cnt ;
+	size_t m_payload_msk ;
+	size_t m_descriptor_msk ;
 	size_t m_total_sz;
 	Control_plane( const char* fd_name , size_t max_slot_cnt, size_t descr_cnt ) noexcept;
 	~Control_plane() ;
 	void*  acquire_write_slot() noexcept;
 	int publish_slot() noexcept;
 
-	private : 
-		 int flush() noexcept;
+	private :
+		/* This function helps to write the last descriptor to inducate a shutdown*/
+		 void shutdown_queue() noexcept;
 };
 
 struct alignas(CACHE_LINE) Data_plane{
@@ -89,15 +98,18 @@ void __attribute__((cold , noinline)) total_failure(){
 	if constexpr (std::is_same_v<Control_plane , T>) {
 	
 		std::fprintf(stderr , "Failure intializing Control Plane\n");
+		exit(1);
 	}else if constexpr (std::is_same_v<Data_plane , T >) {
 		std::fprintf(stderr , "Failure intializing Data Plane\n");
+		exit(1);
 	}else {
 		static_assert(false,"Unknown type in initilization" );
 	}
 }
 
 
-/* Function definitions */
+/* Function definitions */ setne al
+  bsr rdi, rdi
 
 Control_plane::Control_plane(const char* fd_name,  size_t max_slot_cnt  ,size_t descr_cnt) noexcept {
 	if(fd_name == nullptr){
@@ -106,7 +118,15 @@ Control_plane::Control_plane(const char* fd_name,  size_t max_slot_cnt  ,size_t 
 	int ret ;
 	// check for if it is not rounded to the power of 2
 	// use bit ceil on the max slo tand descrnt 
-	size_t total_sz = sizeof(SPSC_queue) + HD_DES_2TYPE  + (max_slot_cnt * MAX_SLOT_SZ) + HD_DES_2TYPE + (descr_cnt * sizeof(Descriptor_t)) ;
+	max_slot_cnt = max_slot_cnt * MAX_SLOT_SZ ;
+	m_payload_msk  = max_slot_cnt - 1  ;
+
+	descr_cnt = descr_cnt * sizeof(Descriptor_t);
+	m_descriptor_msk = descr_cnt -1 ;
+
+
+	size_t total_sz = sizeof(SPSC_queue) + HD_DES_2TYPE  + max_slot_cnt + HD_DES_2TYPE + descr_cnt;
+	m_total_sz = total_sz ;
 
 	int fd = shm_open(fd_name, O_RDWR | O_CREAT, S_IRWXU) ;
 	if(fd == -1) {
@@ -116,13 +136,52 @@ Control_plane::Control_plane(const char* fd_name,  size_t max_slot_cnt  ,size_t 
 	if(ret == -1 ) {
 		total_failure<Control_plane>();
 	}
-	//ftruncate 
-	// mmap 
-	// madvise 
-	// mlock 
+	void* addr = mmap(nullptr , total_sz , PROT_READ |PROT_WRITE , MAP_SHARED | MAP_HUGE_2MB | MAP_HUGETLB , fd , 0);
+	if(addr == MAP_FAILED) {
+		total_failure<Control_plane>();
+	}
 
+	ret = madvise(addr , total_sz, MADV_WILLNEED); 
+	if(ret == -1) {
+		total_failure<Control_plane>();
+	}
+
+	ret = mlock(addr , total_sz);
+	if(ret ==-1 ) {
+		total_failure<Control_plane>();
+	}
+	ret  = shm_unlink(fd_name);
+	if(ret == -1) {
+		total_failure<Control_plane>();
+	}
+	m_actual_mmap_space = addr ;
+	m_queue = reinterpret_cast<SPSC_queue*>(addr);
+	m_payload_queue = reinterpret_cast<unsigned char*>(addr) + (sizeof(SPSC_queue) + HD_DES_2TYPE);
+	m_descriptor_queue =reinterpret_cast<Descriptor_t*>(reinterpret_cast<unsigned char*>(addr) + (sizeof(SPSC_queue) + HD_DES_2TYPE + max_slot_cnt + HD_DES_2TYPE )) ;
+	m_local_ctrl_plane_pos = 0 ; 
+	m_local_data_plane_pos = 0 ;
+	
+	m_queue->m_data_plane_pos.store(0 , std::memory_order_relaxed);
+	m_queue->m_data_mask = 0 ;
+	m_queue->m_actual_data_plane_pos.store(0 , std::memory_order_relaxed);
+
+	m_queue->m_actual_ctrl_plane_pos.store(0 , std::memory_order_relaxed);
+	m_queue->m_ctrl_mask = 0 ;
+	m_queue->m_ctrl_plane_pos.store(0 , std::memory_order_relaxed); 
+
+	m_queue->m_ready.store(std::to_underlying(Data_pl_init::READY) , std::memory_order_release);
 }
 
+
+Control_plane::~Control_plane(){
+	shutdown_queue();
+	munlock(m_actual_mmap_space , m_total_sz);
+	munmap(m_actual_mmap_space , m_total_sz);
+}
+
+void* Control_plane::acquire_write_slot() noexcept{}
+
+int Control_plane::publish_slot() noexcept{}
 // Please rememnber to round to a 128 bytes payload 
 int main(){
 
