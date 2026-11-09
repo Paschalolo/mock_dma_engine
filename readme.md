@@ -1,4 +1,4 @@
-# The "Final Boss" Project: A Lock-Free Host-to-Device Ring Buffer Protocol (Mock DMA Engine)
+A Lock-Free Host-to-Device Ring Buffer Protocol (Mock DMA Engine)
 
 A high-performance, user-space software simulation of a hardware accelerator interface (modeled after enterprise PCIe DMA engines like AWS Nitro or Trainium). This project demonstrates extreme low-latency concurrency, separating the **control plane** (metadata descriptors) from the **data plane** (zero-copy payload arenas) using lock-free Single-Producer Single-Consumer (SPSC) rings and explicit memory barriers.
 
