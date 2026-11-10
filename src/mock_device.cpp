@@ -1,5 +1,10 @@
 
-#define _DEFAULT_SOURCE 
+#include <emmintrin.h>
+#define _DEFAULT_SOURCE
+#if defined (__x86_64__)
+#include <immintrin.h>
+#endif
+#include <concepts>
 #include <unistd.h>
 #include <cstdint>
 #include <sys/stat.h>
@@ -45,12 +50,12 @@ struct alignas(HD_DES_2TYPE)Descriptor_t{
 
 struct alignas(HD_DES_2TYPE) SPSC_queue{
 	std::atomic<std::uint64_t> m_ctrl_plane_pos ; 
-	std::atomic<std::uint64_t> m_actual_ctrl_plane_pos ; 
+	std::atomic<std::uint64_t> m_descriptor_writer_pos ; 
 	std::uint8_t m_ctrl_mask ;
 
 
 	alignas(HD_DES_2TYPE) std::atomic<std::uint64_t> m_data_plane_pos;
-	std::atomic<std::uint64_t> m_actual_data_plane_pos;
+	std::atomic<std::uint64_t> m_descriptor_reader_pos;
 	std::uint8_t m_data_mask ;
 	std::atomic<uint8_t> m_ready; 
 };
@@ -61,10 +66,12 @@ struct alignas(CACHE_LINE) Control_plane{
 	void* m_payload_queue;
 	Descriptor_t* m_descriptor_queue;
 	size_t m_local_data_plane_pos ;
-	size_t m_local_descriptor_pos;
+	size_t m_local_reader_descriptor_pos;
 	void* m_actual_mmap_space;
 	size_t m_payload_msk ;
 	size_t m_descriptor_msk ;
+	size_t m_current_sz ;
+	size_t m_current_pyld_offt ; 
 	size_t m_total_sz;
 	Control_plane( const char* fd_name , size_t max_slot_cnt, size_t descr_cnt ) noexcept;
 	~Control_plane() ;
@@ -80,11 +87,14 @@ struct alignas(CACHE_LINE) Data_plane{
 	SPSC_queue* m_queue ;
 	void* m_payload_queue;
 	Descriptor_t* m_descriptor_queue;
+	void* m_actual__mmap_addr_; 
+
 	size_t m_local_ctrl_plane_pos ;
-	size_t m_local_descriptor_pos;
+	size_t m_local_writer_descriptor_pos;
 	size_t m_payload_msk  ;
 	size_t m_descriptor_msk ;
 	size_t m_total_sz;
+
 	Data_plane(size_t sz , const char* fd_name ,size_t max_slot_cnt  , size_t descr_cnt ) noexcept;
 	~Data_plane();
 	void*  peek_data() noexcept;
@@ -105,6 +115,14 @@ void __attribute__((cold , noinline)) total_failure(){
 	}else {
 		static_assert(false,"Unknown type in initilization" );
 	}
+}
+
+template <typename T , size_t ALIGN  = 128ULL> 
+requires std::unsigned_integral<T>
+auto alignment_rounding(T num){
+	auto mask = !(num & (ALIGN-1)) -1 ;
+	auto pos = (num + (ALIGN & mask)) &( ~(ALIGN-1));
+	return pos ;
 }
 
 
@@ -158,12 +176,12 @@ Control_plane::Control_plane(const char* fd_name,  size_t max_slot_cnt  ,size_t 
 	m_payload_queue = reinterpret_cast<unsigned char*>(addr) + (sizeof(SPSC_queue) + HD_DES_2TYPE);
 	m_descriptor_queue =reinterpret_cast<Descriptor_t*>(reinterpret_cast<unsigned char*>(addr) + (sizeof(SPSC_queue) + HD_DES_2TYPE + max_slot_cnt + HD_DES_2TYPE )) ;
 	m_local_data_plane_pos = 0 ;
-	m_local_descriptor_pos = 0;	
+	m_local_reader_descriptor_pos = 0;	
 	m_queue->m_data_plane_pos.store(0 , std::memory_order_relaxed);
 	m_queue->m_data_mask = 0 ;
-	m_queue->m_actual_data_plane_pos.store(0 , std::memory_order_relaxed);
+	m_queue->m_descriptor_writer_pos.store(0 , std::memory_order_relaxed);
 
-	m_queue->m_actual_ctrl_plane_pos.store(0 , std::memory_order_relaxed);
+	m_queue->m_descriptor_reader_pos.store(0 , std::memory_order_relaxed);
 	m_queue->m_ctrl_mask = 0 ;
 	m_queue->m_ctrl_plane_pos.store(0 , std::memory_order_relaxed); 
 	
@@ -194,14 +212,100 @@ void* Control_plane::acquire_write_slot(size_t sz ) noexcept{
 	if(buffer >  Pay_mask){
 		/* add the descriptor to skipped and restart from front*/ 
 	}
-
-
+	m_current_sz = sz ;
 	return reinterpret_cast<void*>(reinterpret_cast<unsigned char*>(m_payload_queue) + ctrl_pos);
 }
 
 int Control_plane::publish_slot() noexcept{
  	/* pubklish adds to the next 128 byte alignment and then goes*/
+	auto desc_mask = m_descriptor_msk ;  
+	auto desc_pos = m_queue->m_descriptor_writer_pos.load(std::memory_order_acquire);
+	if(desc_pos == m_local_reader_descriptor_pos){
+		/* Empty queue */
+	}
+	if((desc_pos & desc_mask) == (m_local_reader_descriptor_pos & desc_mask) && (desc_pos != m_local_reader_descriptor_pos)){
+		/* buffer is supposed full global ysnc to free more space */
+		/* hard checks if spae is not avaliable flush the previous buffer and reqirte */
+	}
+	auto pos = desc_pos & desc_mask ;
+	m_descriptor_queue[pos].m_length =m_current_sz  ; 
+	m_descriptor_queue[pos].m_payload_offset = m_current_pyld_offt;
+	m_descriptor_queue[pos].m_state.store(DES_FLAG_READY, std::memory_order_release);
+	return 0;
+	
 }
+
+
+Data_plane::Data_plane(size_t sz , const char* fd_name ,size_t max_slot_cnt  , size_t descr_cnt ) noexcept{
+	if(fd_name == nullptr) {
+		total_failure<Data_plane>();
+	}
+	int ret ; 
+	// check if bit rounded to the power of 2 
+	
+	max_slot_cnt = max_slot_cnt * MAX_SLOT_SZ ; 
+	m_payload_msk = max_slot_cnt - 1;
+
+	m_descriptor_msk = descr_cnt -1 ;
+	descr_cnt = descr_cnt * sizeof(Descriptor_t);	
+
+	size_t total_sz = sizeof(SPSC_queue) + HD_DES_2TYPE  + max_slot_cnt + HD_DES_2TYPE + descr_cnt;
+	m_total_sz = total_sz ; 
+
+	int fd = shm_open(fd_name , O_RDWR | O_CREAT , S_IRWXU); 
+	if(fd == -1 ) {
+		total_failure<Data_plane>();
+	}
+
+	ret = ftruncate(fd , static_cast<std::uint32_t>(m_total_sz));
+	if(ret == -1) {
+		total_failure<Data_plane>();
+	}
+
+	void* addr = mmap(nullptr , m_total_sz , PROT_READ | PROT_WRITE , MAP_SHARED | MAP_HUGETLB | MAP_HUGE_2MB , fd , 0);
+	if(addr == MAP_FAILED) {
+		total_failure<Data_plane>();
+	}
+	ret = madvise(addr , total_sz, MADV_WILLNEED); 
+	if(ret == -1) {
+		total_failure<Control_plane>();
+	}
+
+	ret = mlock(addr , total_sz);
+	if(ret ==-1 ) {
+		total_failure<Control_plane>();
+	}
+	ret  = shm_unlink(fd_name);
+	if(ret == -1) {
+		total_failure<Control_plane>();
+	}
+
+	m_actual__mmap_addr_ = addr ;
+	m_queue = reinterpret_cast<SPSC_queue*>(addr);
+	m_payload_queue = reinterpret_cast<unsigned char*>(addr) + (sizeof(SPSC_queue) + HD_DES_2TYPE);
+	m_descriptor_queue =reinterpret_cast<Descriptor_t*>(reinterpret_cast<unsigned char*>(addr) + (sizeof(SPSC_queue) + HD_DES_2TYPE + max_slot_cnt + HD_DES_2TYPE )) ;
+	m_local_writer_descriptor_pos = 0 ; 
+	m_local_ctrl_plane_pos = 0 ;
+	
+	size_t  MAX_RETRIES = 0ULL;
+	while( MAX_RETRIES && m_queue->m_ready.load(std::memory_order_acquire) != std::to_underlying(Data_pl_init::READY)){
+		if(!(MAX_RETRIES & 63ULL)){
+			std::printf("Waiting on the writer\nPlease start the control plane or press ctrl + c to exit");
+		}	
+		#if defined(__x86_64__)
+			_mm_pause();
+		#endif
+			
+	}
+	return;
+}
+
+Data_plane::~Data_plane(){
+	munlock(m_actual__mmap_addr_, m_total_sz);
+	munmap(m_actual__mmap_addr_ , m_total_sz);
+}
+
+
 // Please rememnber to round to a 128 bytes payload 
 int main(){
 
