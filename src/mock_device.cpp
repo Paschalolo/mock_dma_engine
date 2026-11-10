@@ -23,6 +23,7 @@ constexpr size_t MAX_SLOT_SZ = 4096ULL;
 enum Descriptor_state : std::uint32_t{
 	DES_FLAG_FREE  = 0x00 , 
 	DES_FLAG_READY = 0x01 , 
+	DES_FLAG_FILLING = 0x01 , 
 	DES_FLAG_PROCESSING = 0x02 , 
 	DES_FLAG_DONE = 0x03, 
 	DES_FLAG_SKIPPED , 
@@ -59,15 +60,15 @@ struct alignas(CACHE_LINE) Control_plane{
 	SPSC_queue* m_queue ;
 	void* m_payload_queue;
 	Descriptor_t* m_descriptor_queue;
-	size_t m_local_ctrl_plane_pos ;
 	size_t m_local_data_plane_pos ;
+	size_t m_local_descriptor_pos;
 	void* m_actual_mmap_space;
 	size_t m_payload_msk ;
 	size_t m_descriptor_msk ;
 	size_t m_total_sz;
 	Control_plane( const char* fd_name , size_t max_slot_cnt, size_t descr_cnt ) noexcept;
 	~Control_plane() ;
-	void*  acquire_write_slot() noexcept;
+	void*  acquire_write_slot(size_t sz ) noexcept;
 	int publish_slot() noexcept;
 
 	private :
@@ -80,9 +81,9 @@ struct alignas(CACHE_LINE) Data_plane{
 	void* m_payload_queue;
 	Descriptor_t* m_descriptor_queue;
 	size_t m_local_ctrl_plane_pos ;
-	size_t m_local_data_plane_pos ;
-	size_t payload_count ;
-	size_t descriptor_cnt ;
+	size_t m_local_descriptor_pos;
+	size_t m_payload_msk  ;
+	size_t m_descriptor_msk ;
 	size_t m_total_sz;
 	Data_plane(size_t sz , const char* fd_name ,size_t max_slot_cnt  , size_t descr_cnt ) noexcept;
 	~Data_plane();
@@ -119,8 +120,8 @@ Control_plane::Control_plane(const char* fd_name,  size_t max_slot_cnt  ,size_t 
 	max_slot_cnt = max_slot_cnt * MAX_SLOT_SZ ;
 	m_payload_msk  = max_slot_cnt - 1  ;
 
-	descr_cnt = descr_cnt * sizeof(Descriptor_t);
 	m_descriptor_msk = descr_cnt -1 ;
+	descr_cnt = descr_cnt * sizeof(Descriptor_t);
 
 
 	size_t total_sz = sizeof(SPSC_queue) + HD_DES_2TYPE  + max_slot_cnt + HD_DES_2TYPE + descr_cnt;
@@ -156,9 +157,8 @@ Control_plane::Control_plane(const char* fd_name,  size_t max_slot_cnt  ,size_t 
 	m_queue = reinterpret_cast<SPSC_queue*>(addr);
 	m_payload_queue = reinterpret_cast<unsigned char*>(addr) + (sizeof(SPSC_queue) + HD_DES_2TYPE);
 	m_descriptor_queue =reinterpret_cast<Descriptor_t*>(reinterpret_cast<unsigned char*>(addr) + (sizeof(SPSC_queue) + HD_DES_2TYPE + max_slot_cnt + HD_DES_2TYPE )) ;
-	m_local_ctrl_plane_pos = 0 ; 
 	m_local_data_plane_pos = 0 ;
-	
+	m_local_descriptor_pos = 0;	
 	m_queue->m_data_plane_pos.store(0 , std::memory_order_relaxed);
 	m_queue->m_data_mask = 0 ;
 	m_queue->m_actual_data_plane_pos.store(0 , std::memory_order_relaxed);
@@ -166,8 +166,10 @@ Control_plane::Control_plane(const char* fd_name,  size_t max_slot_cnt  ,size_t 
 	m_queue->m_actual_ctrl_plane_pos.store(0 , std::memory_order_relaxed);
 	m_queue->m_ctrl_mask = 0 ;
 	m_queue->m_ctrl_plane_pos.store(0 , std::memory_order_relaxed); 
-
-	m_queue->m_ready.store(std::to_underlying(Data_pl_init::READY) , std::memory_order_release);
+	
+	// atomic should be viewable from here 
+	m_queue->m_ready.store(std::to_underlying(Data_pl_init::READY) , std::memory_order_seq_cst);
+	std::atomic_thread_fence(std::memory_order_release);
 }
 
 
@@ -177,9 +179,29 @@ Control_plane::~Control_plane(){
 	munmap(m_actual_mmap_space , m_total_sz);
 }
 
-void* Control_plane::acquire_write_slot() noexcept{}
+void* Control_plane::acquire_write_slot(size_t sz ) noexcept{
+	auto Pay_mask = m_payload_msk ; 
+	auto Des_mask = m_payload_msk ; 
 
-int Control_plane::publish_slot() noexcept{}
+	auto ctrl_pos = m_queue->m_ctrl_plane_pos.load(std::memory_order_acquire);	
+	if(ctrl_pos == m_local_data_plane_pos) /* Means queu is empty fill*/{
+	}
+	if(((ctrl_pos & Pay_mask) == (Pay_mask & m_local_data_plane_pos)) && (ctrl_pos != m_local_data_plane_pos)){
+		/* Queue is full do stuff cold outside */
+	}
+	/*remember align always to 128 bytes */
+	auto buffer = (ctrl_pos & Pay_mask) +sz ;
+	if(buffer >  Pay_mask){
+		/* add the descriptor to skipped and restart from front*/ 
+	}
+
+
+	return reinterpret_cast<void*>(reinterpret_cast<unsigned char*>(m_payload_queue) + ctrl_pos);
+}
+
+int Control_plane::publish_slot() noexcept{
+ 	/* pubklish adds to the next 128 byte alignment and then goes*/
+}
 // Please rememnber to round to a 128 bytes payload 
 int main(){
 
