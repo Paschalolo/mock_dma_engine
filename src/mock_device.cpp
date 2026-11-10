@@ -1,6 +1,8 @@
 
-#include <emmintrin.h>
+#include <cstddef>
 #define _DEFAULT_SOURCE
+
+
 #if defined (__x86_64__)
 #include <immintrin.h>
 #endif
@@ -19,11 +21,12 @@
 #include <bit>
 #include <utility>
 /* Error Definitions */ 
-
 /* Definitions */
 constexpr size_t CACHE_LINE {std::hardware_destructive_interference_size};
 constexpr size_t HD_DES_2TYPE {std::hardware_destructive_interference_size * 2ULL };
 constexpr size_t MAX_SLOT_SZ = 4096ULL;
+constexpr long long DP_READ_FAILED_t = -1;
+#define DP_READ_FAILED reinterpret_cast<void*>(DP_READ_FAILED_t)
 /* ENum Definitions */
 enum Descriptor_state : std::uint32_t{
 	DES_FLAG_FREE  = 0x00 , 
@@ -94,10 +97,9 @@ struct alignas(CACHE_LINE) Data_plane{
 	size_t m_payload_msk  ;
 	size_t m_descriptor_msk ;
 	size_t m_total_sz;
-
-	Data_plane(size_t sz , const char* fd_name ,size_t max_slot_cnt  , size_t descr_cnt ) noexcept;
+	Data_plane( const char* fd_name ,size_t max_slot_cnt  , size_t descr_cnt ) noexcept;
 	~Data_plane();
-	void*  peek_data() noexcept;
+	void*  peek_data(size_t* ) noexcept;
 	int read_free()noexcept;
 	private :
 };
@@ -228,6 +230,7 @@ int Control_plane::publish_slot() noexcept{
 		/* hard checks if spae is not avaliable flush the previous buffer and reqirte */
 	}
 	auto pos = desc_pos & desc_mask ;
+	// add to the gloabl vairable here 
 	m_descriptor_queue[pos].m_length =m_current_sz  ; 
 	m_descriptor_queue[pos].m_payload_offset = m_current_pyld_offt;
 	m_descriptor_queue[pos].m_state.store(DES_FLAG_READY, std::memory_order_release);
@@ -236,7 +239,7 @@ int Control_plane::publish_slot() noexcept{
 }
 
 
-Data_plane::Data_plane(size_t sz , const char* fd_name ,size_t max_slot_cnt  , size_t descr_cnt ) noexcept{
+Data_plane::Data_plane( const char* fd_name ,size_t max_slot_cnt  , size_t descr_cnt ) noexcept{
 	if(fd_name == nullptr) {
 		total_failure<Data_plane>();
 	}
@@ -306,10 +309,28 @@ Data_plane::~Data_plane(){
 }
 
 
-void*  Data_plane::peek_data() noexcept{
-	
+void*  Data_plane::peek_data(size_t* sz ) noexcept{
+	auto desc_mask = m_descriptor_msk ; 
+	auto desc_pos = m_queue->m_descriptor_reader_pos.load(std::memory_order_acquire);
+	if((desc_pos & desc_mask) == (m_local_writer_descriptor_pos & desc_mask) && (desc_pos != m_local_writer_descriptor_pos)){
+		/* buffer is supposed full global ysnc to free more space */
+	}
+	if(m_descriptor_queue[(desc_pos * desc_mask)].m_state.load(std::memory_order_acquire) != DES_FLAG_READY){
+	 	return DP_READ_FAILED ;	
+	}
+	 auto off_payload = m_descriptor_queue[(desc_pos & desc_mask)].m_payload_offset ; 
+	 auto off_sz  = m_descriptor_queue[(desc_pos & desc_mask)].m_length ;
+	*sz = off_sz ;
+	return (reinterpret_cast<unsigned char*>(m_payload_queue) + off_payload);
 }
 int Data_plane::read_free()noexcept {
+	auto desc_mask = m_descriptor_msk ; 
+	auto desc_pos = m_queue->m_descriptor_reader_pos.load(std::memory_order_acquire);
+	auto sz = m_descriptor_queue[(desc_pos * desc_mask)].m_length ;
+	m_descriptor_queue[(desc_pos * desc_mask)].m_state.store(DES_FLAG_DONE , std::memory_order_relaxed);
+	m_queue->m_data_plane_pos.fetch_add(sz , std::memory_order_relaxed);
+	m_queue->m_descriptor_reader_pos.fetch_add(1 , std::memory_order_release);
+	
 	return 0;
 }
 // Please rememnber to round to a 128 bytes payload 
