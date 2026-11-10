@@ -306,6 +306,12 @@ Data_plane::~Data_plane(){
 }
 
 
+void*  Data_plane::peek_data() noexcept{
+	
+}
+int Data_plane::read_free()noexcept {
+	return 0;
+}
 // Please rememnber to round to a 128 bytes payload 
 int main(){
 
