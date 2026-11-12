@@ -20,7 +20,9 @@
 #include <type_traits>
 #include <bit>
 #include <utility>
-/* Error Definitions */ 
+/* Error Definitions */
+
+
 /* Definitions */
 constexpr size_t CACHE_LINE {std::hardware_destructive_interference_size};
 constexpr size_t HD_DES_2TYPE {std::hardware_destructive_interference_size * 2ULL };
